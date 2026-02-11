@@ -134,7 +134,7 @@ def run_inference_subprocess(cfg: DictConfig) -> dict:
     Run inference.py by directly importing and calling.
     """
     # Import here to avoid circular dependencies
-    from inference import run_inference
+    from src.inference import run_inference
     
     metrics = run_inference(cfg)
     return metrics

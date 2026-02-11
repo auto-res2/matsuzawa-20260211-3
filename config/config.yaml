@@ -3,6 +3,7 @@
 
 defaults:
   - run: ???  # Required: specify via command line (e.g., run=proposed-bert-imdb)
+  - _self_
 
 # Execution mode: main, sanity_check, or pilot
 mode: main

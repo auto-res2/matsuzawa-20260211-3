@@ -18,7 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from omegaconf import DictConfig, OmegaConf
 import wandb
 
-from preprocess import (
+from src.preprocess import (
     load_gsm8k,
     check_answer_correctness,
     build_few_shot_prompt,
