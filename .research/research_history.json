@@ -729,5 +729,112 @@
     "experimental_code": "import re\nimport math\nimport ast\nfrom dataclasses import dataclass\nfrom collections import defaultdict\n\nANS_RE = re.compile(r\"^\\s*Answer\\s*:\\s*(.+?)\\s*$\", re.M)\nSCORE_RE = re.compile(r\"^\\s*Score\\s*:\\s*([01](?:\\.\\d+)?)\\s*$\", re.M)\nCHECK_RE = re.compile(r\"^\\s*Check\\s*:\\s*(.+?)\\s*$\", re.M)\n\n# -------- Safe arithmetic eval (no names/calls) --------\n_ALLOWED_NODES = (\n    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,\n    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,\n    ast.USub, ast.UAdd, ast.Tuple, ast.List\n)\n\ndef safe_arith_eval(expr: str):\n    \"\"\"Evaluate a pure arithmetic expression safely (no variables, no function calls).\"\"\"\n    tree = ast.parse(expr, mode=\"eval\")\n    for node in ast.walk(tree):\n        if not isinstance(node, _ALLOWED_NODES):\n            raise ValueError(f\"Disallowed node: {type(node).__name__}\")\n        # Block any Name/Call/Attribute/Subscript implicitly by allowed set\n    return eval(compile(tree, \"<check>\", \"eval\"), {\"__builtins__\": {}}, {})\n\n\ndef parse_fields(text: str):\n    a = ANS_RE.search(text)\n    s = SCORE_RE.search(text)\n    c = CHECK_RE.search(text)\n    ans = a.group(1).strip() if a else None\n    score = float(s.group(1)) if s else None\n    if score is not None:\n        score = max(0.0, min(1.0, score))\n    check = c.group(1).strip() if c else None\n    return ans, score, check\n\n\ndef _coerce_number(x: str):\n    \"\"\"Try int then float; else return original string.\"\"\"\n    try:\n        if re.fullmatch(r\"[-+]?\\d+\", x.strip()):\n            return int(x)\n        return float(x)\n    except Exception:\n        return x.strip()\n\n\ndef verify_check(ans_str: str, check_expr: str, tol: float = 1e-6) -> bool:\n    if ans_str is None or check_expr is None:\n        return False\n    ans = _coerce_number(ans_str)\n    try:\n        val = safe_arith_eval(check_expr)\n    except Exception:\n        return False\n    # numeric match if both numeric\n    if isinstance(ans, (int, float)) and isinstance(val, (int, float)):\n        return abs(float(ans) - float(val)) <= tol\n    return str(ans).strip() == str(val).strip()\n\n\n@dataclass\nclass AggState:\n    tally: dict\n    total_w: float\n\n\ndef vmsca_update(state: AggState, sample_text: str, beta=2.0, delta=0.05, default_score=0.5):\n    ans, score, check = parse_fields(sample_text)\n    if ans is None:\n        return state\n    if score is None:\n        score = default_score\n    v = verify_check(ans, check)\n    w = math.exp(beta * score) * (1.0 if v else delta)\n    state.tally[ans] += w\n    state.total_w += w\n    return state\n\n\ndef vmsca_predict(samples, beta=2.0, delta=0.05):\n    tally = defaultdict(float)\n    total_w = 0.0\n    for t in samples:\n        st = AggState(tally, total_w)\n        st = vmsca_update(st, t, beta=beta, delta=delta)\n        tally, total_w = st.tally, st.total_w\n    if not tally:\n        return None, 0.0\n    best_ans, best_w = max(tally.items(), key=lambda kv: kv[1])\n    conf = best_w / max(1e-12, sum(tally.values()))\n    return best_ans, conf\n\n\ndef vmsca_predict_adaptive(sample_stream, beta=2.0, delta=0.05, tau=0.85, m_max=10):\n    \"\"\"sample_stream yields sample_text strings one-by-one.\"\"\"\n    tally = defaultdict(float)\n    total = 0.0\n    used = 0\n    for t in sample_stream:\n        used += 1\n        st = AggState(tally, total)\n        st = vmsca_update(st, t, beta=beta, delta=delta)\n        tally, total = st.tally, st.total_w\n        if tally:\n            best_ans, best_w = max(tally.items(), key=lambda kv: kv[1])\n            conf = best_w / max(1e-12, sum(tally.values()))\n            if conf >= tau:\n                return best_ans, conf, used\n        if used >= m_max:\n            break\n    if not tally:\n        return None, 0.0, used\n    best_ans, best_w = max(tally.items(), key=lambda kv: kv[1])\n    conf = best_w / max(1e-12, sum(tally.values()))\n    return best_ans, conf, used\n\n\n# Prompt snippet to append (example):\n# \"\"\"\n# After solving, do a quick check. Output EXACTLY:\n# Answer: <final numeric answer>\n# Score: <probability 0 to 1>\n# Check: <a pure arithmetic Python expression that evaluates to the same final answer>\n# \"\"\"\n",
     "expected_result": "On 200 GSM8K test items (small open instruct model; m_max=10):\n- CoT-greedy: 10–15% accuracy.\n- SC-majority (m=10): 13–18%.\n- MW-SC (metacognitive weight only): 15–20%.\n- **VMSCA (proposed)**: 17–23%.\n\nKey expected deltas:\n- +2 to +4 absolute accuracy points over MW-SC, and +3 to +6 over SC-majority, driven by cases where wrong traces produce inconsistent `Check:` expressions (penalized by δ) even if their `Score:` is high.\n- Confidently-wrong rate (secondary) decreases by ~20–35% relative (e.g., from ~0.30 to ~0.20 among incorrect predictions) because verification suppresses high-confidence arithmetic slips.\n- Adaptive stopping uses fewer samples on easy items: average samples used ~5–7 (vs fixed 10), with minimal accuracy loss compared to fixed-sample VMSCA.\n\nOn SVAMP (200 items), expect smaller but consistent gains (+1 to +4 accuracy points over MW-SC), indicating improved robustness beyond a single dataset.",
     "expected_conclusion": "A prompt-only, human-inspired “answer-then-check” signal becomes substantially more reliable when the check is made **machine-verifiable**. By combining (i) a metacognitive self-score with (ii) a Python-checkable self-verification artifact, VMSCA turns self-consistency from frequency counting into a lightweight reliability-weighted marginalization that is less vulnerable to miscalibrated confidence and biased wrong majorities. Academically, it introduces a concrete bridge between metacognitive monitoring and *verifiable* trace reliability—going beyond incremental confidence weighting by adding an externalized, testable audit. Practically/socially, it reduces confidently wrong outputs and can lower inference cost via adaptive stopping, improving the safety and trustworthiness of LLM-based tutoring and decision support without any fine-tuning or heavy experimentation."
+  },
+  "experimental_design": {
+    "experiment_summary": "Task: solve grade-school arithmetic word problems by generating a final numeric answer. We compare standard Self-Consistency (SC) aggregation against a prompt-only variant that forces each sampled trace to (i) state a final answer, (ii) provide a self-assessed probability, and (iii) emit a Python-evaluable arithmetic check that should reproduce the same answer. The Python-side evaluator verifies each sample’s check and uses this verification signal to downweight internally inconsistent traces, then performs weighted voting; additionally, it can stop sampling early when the leading answer is sufficiently dominant.\n\nWorkflow:\n1) Load a small evaluation subset from GSM8K (test split). For each problem, construct a shared base prompt (instructions + optional few-shot exemplars).\n2) Run the same open LLM under two methods:\n   - Baseline SC-majority: sample m=10 completions at temperature=0.7, parse `Answer:` and majority-vote.\n   - Proposed VMSCA: sample sequentially up to m_max=10 at temperature=0.7 using a stricter output format (`Answer/Score/Check`), locally verify `Check` via safe AST evaluation, compute weights w_i = exp(beta*s_i)·(1 if verified else delta), aggregate by weighted vote, and stop early if normalized top-weight >= tau (and optionally guard with ESS).\n3) Tune (beta, delta, tau) only on a tiny validation slice (e.g., 30 items from GSM8K train) without any fine-tuning; then evaluate once on the held-out GSM8K test subset.\n4) Report primary accuracy plus secondary safety/cost metrics (confidently-wrong rate, average samples used, etc.) and analyze failure cases where SC’s majority is “confidently wrong” but VMSCA suppresses inconsistent traces.\n\nScale fitting the provided Runner (1×H200 140GB): inference-only, single model (Qwen3-8B), limited decoding budget (max_new_tokens ~512–768), and small dataset slice (first 200 GSM8K test items). Worst-case generations: 200 problems × 10 samples × ~700 tokens ≈ 1.4M tokens per method, which is practical on an H200; adaptive stopping further reduces VMSCA’s average samples.",
+    "runner_config": {
+      "runner_label": [
+        "self-hosted",
+        "gpu-runner"
+      ],
+      "description": "NVIDIA H200, VRAM: 140 GB, RAM: 240 GB"
+    },
+    "evaluation_metrics": [
+      {
+        "name": "accuracy",
+        "description": "Correctness criteria: A prediction is correct if the model’s extracted final answer matches the dataset’s ground-truth numeric answer after normalization. Normalization should: (i) extract the first number-like token from `Answer:` (or from the whole output if missing), (ii) convert to int when it is an integer string, else to float, (iii) compare ints by exact equality and floats by |pred−gold|<=1e-6 (or a relative tolerance like 1e-6*max(1,|gold|)).\n\nCalculation method: accuracy = (1/N) * Σ_{j=1..N} 1[pred_j == gold_j under numeric normalization].\n\nTask appropriateness: GSM8K is a single-final-number reasoning task; accuracy directly measures whether reasoning and arithmetic end in the correct solution.\n\nRelevant visualizations: (a) bar chart of accuracy by method; (b) accuracy vs. sample budget curve (compute accuracy for prefixes k=1..10) to show sampling efficiency; (c) histogram of numeric absolute errors for incorrect predictions."
+      },
+      {
+        "name": "Confidently-wrong rate",
+        "description": "Correctness criteria: An item is “confidently wrong” if the prediction is incorrect (per the same numeric normalization as accuracy) AND the method’s aggregation confidence exceeds a threshold (default 0.8).\n\nFor SC-majority, define aggregation confidence as: conf_SC = (count of majority answer) / m.\nFor VMSCA, define aggregation confidence as: conf_V = (weight of top answer) / (sum of weights over all distinct answers).\n\nCalculation method: CW@0.8 = (# items with incorrect AND conf>0.8) / N.\n\nTask appropriateness: The hypothesis targets ‘confidently wrong majorities’ and miscalibrated confidence; this metric directly quantifies high-confidence failures.\n\nRelevant visualizations: reliability-style scatter of (conf, correctness) binned; stacked bar chart of correct vs incorrect across confidence bins (0–0.2,…,0.8–1.0)."
+      },
+      {
+        "name": "Average samples used",
+        "description": "Correctness criteria: Measures inference cost. For fixed-budget methods, samples_used = m (here 10). For VMSCA adaptive stopping, samples_used is the number of completions generated until stopping criterion triggers or m_max is reached.\n\nCalculation method: AvgSamples = (1/N) * Σ_{j=1..N} samples_used_j.\n\nTask appropriateness: The method claims reduced sampling cost via adaptive stopping; this metric quantifies compute savings.\n\nRelevant visualizations: histogram/violin plot of samples_used for VMSCA; accuracy vs AvgSamples trade-off curve by varying tau."
+      },
+      {
+        "name": "Verification pass rate",
+        "description": "Correctness criteria: For VMSCA samples, a completion ‘passes verification’ if `Check:` can be safely evaluated (restricted AST arithmetic) and equals the parsed `Answer:` (exact for ints, tolerance for floats). If fields are missing or evaluation errors occur, it fails.\n\nCalculation method: PassRate = (total verified samples) / (total generated samples) aggregated over all problems (or average per-problem pass fraction).\n\nTask appropriateness: This measures how often the prompt elicits a usable self-verification artifact, which is central to VMSCA’s mechanism.\n\nRelevant visualizations: bar chart of pass rate; correlation plot between per-item pass fraction and correctness; breakdown pie/bar of failure reasons (parse fail vs unsafe AST node vs wrong value)."
+      },
+      {
+        "name": "Effective sample size (ESS) of weights",
+        "description": "Correctness criteria: Quantifies weight concentration/collapse in VMSCA.\n\nCalculation method: For each problem with weights w_i over used samples i=1..k, compute normalized p_i = w_i / Σ w_i, then ESS = 1 / Σ p_i^2. Report mean ESS and distribution across problems.\n\nTask appropriateness: Adaptive stopping and strong downweighting (delta<<1) can cause weight collapse; ESS diagnoses whether aggregation relies on too few samples.\n\nRelevant visualizations: histogram of ESS; scatter of ESS vs. correctness; ESS vs. samples_used to validate stopping behavior."
+      },
+      {
+        "name": "Expected Calibration Error (ECE) on aggregation confidence",
+        "description": "Correctness criteria: Uses each item’s aggregation confidence (conf_SC or conf_V) and whether the final prediction is correct.\n\nCalculation method: Bin confidences into B bins (e.g., 10). For bin b, compute acc(b)=mean(correct), conf(b)=mean(conf). Then ECE = Σ_{b=1..B} (|b|/N) * |acc(b) − conf(b)|.\n\nTask appropriateness: The hypothesis highlights miscalibrated confidence; ECE measures calibration quality of the method-level confidence proxy.\n\nRelevant visualizations: calibration (reliability) diagram: acc(b) vs conf(b); compare ECE across methods."
+      }
+    ],
+    "models_to_use": [
+      "Qwen3-8B (8B parameters)"
+    ],
+    "datasets_to_use": [
+      "gsm8k"
+    ],
+    "proposed_method": {
+      "method_name": "VMSCA (Verified Metacognitive Self-Consistency with Adaptive Stopping)",
+      "description": "Inference-time, prompt-only self-consistency variant. Each sampled completion must output `Answer`, `Score` (self probability), and `Check` (Python-evaluable arithmetic expression intended to reproduce the answer). The evaluator safely executes `Check` locally to obtain a binary verification signal. Samples are aggregated by weighted vote with verification-aware weights: w_i = exp(beta*s_i) if verified else exp(beta*s_i)*delta (delta≪1). Sampling proceeds sequentially and stops early when the leading answer’s normalized weight exceeds tau (optionally requiring ESS above a minimum to avoid premature collapse). Novelty: uses a deterministic, Python-checkable self-audit signal to override miscalibrated self-confidence without extra model calls or fine-tuning, and provides a principled early-stopping rule.",
+      "optuna_config": {
+        "enabled": true,
+        "n_trials": 20,
+        "search_spaces": [
+          {
+            "param_name": "beta",
+            "distribution_type": "categorical",
+            "choices": [
+              0,
+              1,
+              2,
+              4
+            ]
+          },
+          {
+            "param_name": "delta",
+            "distribution_type": "categorical",
+            "choices": [
+              0.01,
+              0.05,
+              0.1
+            ]
+          },
+          {
+            "param_name": "tau",
+            "distribution_type": "categorical",
+            "choices": [
+              0.8,
+              0.85,
+              0.9
+            ]
+          },
+          {
+            "param_name": "max_new_tokens",
+            "distribution_type": "categorical",
+            "choices": [
+              512,
+              768
+            ]
+          },
+          {
+            "param_name": "temperature",
+            "distribution_type": "categorical",
+            "choices": [
+              0.6,
+              0.7,
+              0.8
+            ]
+          }
+        ]
+      }
+    },
+    "comparative_methods": [
+      {
+        "method_name": "SC-majority (Self-Consistency majority vote)",
+        "description": "Standard self-consistency baseline: sample m=10 independent chain-of-thought completions at temperature=0.7 (same base prompt but without requiring a verifiable `Check`). Parse each completion’s `Answer:` and predict by simple majority vote. Confidence proxy is vote share of the majority answer.",
+        "optuna_config": {
+          "enabled": false,
+          "n_trials": 20
+        }
+      }
+    ]
   }
 }
