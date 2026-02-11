@@ -1,0 +1,70 @@
+# VMSCA (Verified Metacognitive Self-Consistency with Adaptive Stopping) - Proposed method
+# Run ID: proposed-qwen3-gsm8k
+
+run_id: proposed-qwen3-gsm8k
+
+method:
+  name: VMSCA
+  type: proposed
+  description: "Verified Metacognitive Self-Consistency with Adaptive Stopping"
+  
+  # Inference parameters
+  model_name: Qwen/Qwen2.5-3B-Instruct
+  temperature: 0.7
+  max_new_tokens: 512
+  m_max: 10  # max samples per problem
+  
+  # VMSCA-specific aggregation hyperparameters
+  beta: 2.0  # metacognitive confidence weight (exp scaling)
+  delta: 0.05  # penalty multiplier for failed verification
+  tau: 0.85  # early stopping threshold (normalized weight)
+  default_score: 0.5  # fallback if Score field missing
+  
+  # Prompt configuration
+  require_format: true  # enforce Answer/Score/Check format
+  few_shot_examples: 3
+
+dataset:
+  name: gsm8k
+  split: test
+  max_samples: 200  # first 200 test items
+  cache_dir: .cache
+
+# Optuna hyperparameter search (only for proposed method)
+optuna:
+  enabled: true
+  n_trials: 20
+  sampler: TPESampler
+  direction: maximize
+  metric: accuracy
+  
+  # Validation set for tuning (tiny slice from train)
+  validation:
+    split: train
+    max_samples: 30
+  
+  search_space:
+    beta:
+      type: categorical
+      choices: [0, 1, 2, 4]
+    delta:
+      type: categorical
+      choices: [0.01, 0.05, 0.1]
+    tau:
+      type: categorical
+      choices: [0.8, 0.85, 0.9]
+    max_new_tokens:
+      type: categorical
+      choices: [512, 768]
+    temperature:
+      type: categorical
+      choices: [0.6, 0.7, 0.8]
+
+# WandB integration
+wandb:
+  tags:
+    - vmsca
+    - prompt-tuning
+    - self-consistency
+    - gsm8k
+    - proposed

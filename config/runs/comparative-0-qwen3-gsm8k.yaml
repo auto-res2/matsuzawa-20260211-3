@@ -1,0 +1,37 @@
+# SC-majority (Self-Consistency majority vote) - Baseline comparative method
+# Run ID: comparative-0-qwen3-gsm8k
+
+run_id: comparative-0-qwen3-gsm8k
+
+method:
+  name: SC-majority
+  type: comparative
+  description: "Standard Self-Consistency with majority voting"
+  
+  # Inference parameters
+  model_name: Qwen/Qwen2.5-3B-Instruct
+  temperature: 0.7
+  max_new_tokens: 512
+  m: 10  # fixed sample budget
+  
+  # SC-majority aggregation (no hyperparameters to tune)
+  require_format: false  # only require Answer field
+  few_shot_examples: 3
+
+dataset:
+  name: gsm8k
+  split: test
+  max_samples: 200  # first 200 test items
+  cache_dir: .cache
+
+# No Optuna for baseline
+optuna:
+  enabled: false
+
+# WandB integration
+wandb:
+  tags:
+    - sc-majority
+    - self-consistency
+    - gsm8k
+    - baseline
